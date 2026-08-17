@@ -4,6 +4,7 @@ package retry
 
 import (
 	"context"
+	"io"
 	"math"
 	"math/rand"
 	"net/http"
@@ -82,6 +83,11 @@ type Result struct {
 // Sleeps between attempts are context-aware: if ctx is canceled while
 // waiting for the next attempt, Do returns immediately with ctx.Err(). This
 // means retries are bounded by both MaxAttempts and the caller's deadline.
+//
+// Response body ownership: every response except the one ultimately
+// returned is drained and closed internally, so callers never see (and
+// never need to close) an intermediate attempt's body — only the final
+// *http.Response, which the caller owns and must close.
 func Do(
 	ctx context.Context,
 	p Policy,
@@ -117,6 +123,14 @@ func Do(
 
 		if !classify(resp, err) {
 			return resp, Result{Attempts: attempt, Retried: attempt > 1}, err
+		}
+
+		if attempt < maxAttempts {
+			// Retrying: this response isn't the one we return, so drain
+			// and close it now rather than leaking it. Draining (instead
+			// of a bare Close) gives the underlying transport a chance to
+			// reuse the connection for the next attempt.
+			drainAndClose(resp)
 		}
 	}
 
@@ -156,6 +170,16 @@ func (p Policy) jitterFloat64() float64 {
 		return p.Rand.Float64()
 	}
 	return rand.Float64()
+}
+
+// drainAndClose discards and closes an intermediate (non-final) response
+// body so its connection can be reused and its resources released.
+func drainAndClose(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
 
 // retryAfterDelay extracts an integer-seconds Retry-After delay from resp,

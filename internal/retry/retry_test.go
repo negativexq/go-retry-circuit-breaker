@@ -3,9 +3,11 @@ package retry_test
 import (
 	"context"
 	"errors"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +143,82 @@ func TestFirstAttemptIsImmediate(t *testing.T) {
 	p := testPolicy()
 	if d := p.Delay(1); d != 0 {
 		t.Fatalf("expected attempt 1 to be immediate, got %v", d)
+	}
+}
+
+// closeTrackingBody wraps an io.Reader and records whether Close was called,
+// so tests can assert on response body lifecycle without a real connection.
+type closeTrackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+// sequenceTransport is a fake http.RoundTripper returning canned responses
+// in order, one per call.
+type sequenceTransport struct {
+	responses []*http.Response
+	idx       int
+}
+
+func (t *sequenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp := t.responses[t.idx]
+	t.idx++
+	resp.Request = req
+	return resp, nil
+}
+
+func TestRetryClosesIntermediateResponseBodies(t *testing.T) {
+	statuses := []int{503, 503, 503, 200}
+	bodies := make([]*closeTrackingBody, len(statuses))
+	responses := make([]*http.Response, len(statuses))
+
+	for i, status := range statuses {
+		b := &closeTrackingBody{Reader: strings.NewReader("body")}
+		bodies[i] = b
+		responses[i] = &http.Response{
+			StatusCode: status,
+			Body:       b,
+			Header:     make(http.Header),
+		}
+	}
+
+	hc := &http.Client{Transport: &sequenceTransport{responses: responses}}
+
+	resp, result, err := retry.Do(context.Background(), testPolicy(), nil, func(ctx context.Context, attempt int) (*http.Response, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid", nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		return hc.Do(req)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Attempts != 4 {
+		t.Fatalf("expected 4 attempts, got %d", result.Attempts)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected final response to be 200, got %d", resp.StatusCode)
+	}
+
+	for i := 0; i < 3; i++ {
+		if !bodies[i].closed {
+			t.Errorf("expected intermediate response body for attempt %d to be closed, but it wasn't", i+1)
+		}
+	}
+	if bodies[3].closed {
+		t.Error("expected final response body to still be open, but Do closed it")
+	}
+
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("caller-side close of final body failed: %v", err)
+	}
+	if !bodies[3].closed {
+		t.Error("expected final response body to be closeable by the caller")
 	}
 }

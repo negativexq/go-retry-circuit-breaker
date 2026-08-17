@@ -167,9 +167,15 @@ func (b *CircuitBreaker) RecordSuccess()
 func (b *CircuitBreaker) RecordFailure()
 ```
 
-`Allow` also handles the OPEN -> HALF-OPEN transition and limits concurrent
-probes to `HalfOpenMaxCalls`. Time is injectable (`breaker.NewWithClock`) so
-tests can advance the cooldown without sleeping.
+`Allow` also handles the OPEN -> HALF-OPEN transition. `FailureThreshold <= 0`
+is normalized to `1` rather than tripping on the very first failure by
+accident. `HalfOpenMaxCalls` is reserved for future use — v1 always hard-caps
+HALF-OPEN to a single in-flight probe, because allowing multiple concurrent
+probes raises an ordering question (a probe that succeeds and closes the
+circuit, followed by a still-in-flight probe that then fails, would
+incorrectly count as a CLOSED-state failure) that's out of scope here. Time
+is injectable (`breaker.NewWithClock`) so tests can advance the cooldown
+without sleeping.
 
 ## Retry + Breaker Interaction
 
@@ -248,6 +254,11 @@ The flaky upstream used by these tests is
   safely is a separate correctness problem (idempotency keys, dedup) that's
   out of scope here — see the idempotency-focused repo in this series
   instead.
+- Response body ownership: `retry.Do` drains and closes every intermediate
+  attempt's response body internally (so a retried `503`/`500` doesn't leak
+  a connection), and hands back only the final `*http.Response` — that one
+  the caller owns and must close. See
+  [`TestRetryClosesIntermediateResponseBodies`](internal/retry/retry_test.go).
 
 ## Engineering Notes
 

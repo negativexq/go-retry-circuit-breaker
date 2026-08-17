@@ -44,8 +44,12 @@ type Config struct {
 	// HALF-OPEN probe.
 	OpenTimeout time.Duration
 
-	// HalfOpenMaxCalls caps the number of concurrent probe calls allowed
-	// while HALF-OPEN. Defaults to 1 if <= 0.
+	// HalfOpenMaxCalls is reserved for future use. v1 hard-caps HALF-OPEN
+	// to a single in-flight probe regardless of this value: allowing
+	// multiple concurrent probes raises an ordering question (a probe that
+	// succeeds and closes the circuit, followed by a still-in-flight probe
+	// that then fails, would incorrectly count as a CLOSED-state failure)
+	// that needs more than a config knob to resolve correctly.
 	HalfOpenMaxCalls int
 }
 
@@ -71,9 +75,11 @@ func New(cfg Config) *CircuitBreaker {
 // NewWithClock creates a CircuitBreaker using an injectable clock, so tests
 // can simulate cooldown elapsing without sleeping.
 func NewWithClock(cfg Config, now func() time.Time) *CircuitBreaker {
-	if cfg.HalfOpenMaxCalls <= 0 {
-		cfg.HalfOpenMaxCalls = 1
+	if cfg.FailureThreshold <= 0 {
+		cfg.FailureThreshold = 1
 	}
+	// See the HalfOpenMaxCalls doc comment: v1 always hard-caps this to 1.
+	cfg.HalfOpenMaxCalls = 1
 	return &CircuitBreaker{cfg: cfg, now: now, state: Closed}
 }
 
